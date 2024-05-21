@@ -1,4 +1,4 @@
-package com.connect.DB.service;
+package com.connect.DB.data;
 
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;

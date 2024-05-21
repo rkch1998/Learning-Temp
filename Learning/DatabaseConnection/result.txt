@@ -1,0 +1,447 @@
+DROP FUNCTION IF EXISTS tds."InsertDownloadedEInvoiceDocuments";
+CREATE OR REPLACE FUNCTION tds."InsertDownloadedEInvoiceDocuments"("_SubscriberId" integer, "_UserId" integer, "_EntityId" integer, "_Documents" gst."DownloadedGstnEInvoiceDocumentType"[], "_DocumentItems" gst."DownloadedGstnEInvoiceDocumentItemType"[], "_DocumentReferences" common."DocumentReferenceType"[], "_DocumentContacts" gst."DownloadedGstnEInvoiceDocumentContactType"[], "_DocumentSignedDetails" gst."DownloadedGstnEInvoiceDocumentSignedDetailType"[], "_OverwritePrRecord" boolean, "_SourceType" smallint, "_SourceTypeEInvoice" smallint, "_SourceTypeTaxpayer" smallint, "_EInvoicePushStatusGenerated" smallint, "_EInvoicePushStatusCancelled" smallint, "_DocumentStatusActive" smallint, "_DocumentStatusCancelled" smallint, "_PushToGstStatusCancelled" smallint, "_ContactTypeBillFrom" smallint, "_DocumentTypeCRN" smallint, "_DocumentTypeDBN" smallint, "_SupplyTypeP" smallint)
+ RETURNS TABLE("Id" bigint, "PlanLimitApplicable" boolean, "GroupId" integer)
+ LANGUAGE plpgsql
+AS $function$
+/*--------------------------------------------------------------------------------------------------------------------------------------
+* 	Procedure Name		: tds.InsertDownloadedEInvoiceDocuments
+* 	Comments			: 27-03-2023 | Dhruv Amin | This procedure is used to insert  document based on cirp generated against me api
+----------------------------------------------------------------------------------------------------------------------------------------
+*	Test Execution		: SELECT * FROM tds."InsertDownloadedEInvoiceDocuments"(
+								"_SubscriberId" => NULL :: INT,
+								"_UserId" => NULL :: INT,
+								"_EntityId" => NULL :: INT,
+								"_Documents" => NULL :: tds."DownloadedEInvoiceDocumentType",
+								"_DocumentItems" => NULL :: tds."DownloadedEInvoiceDocumentItemType",
+								"_DocumentReferences" => NULL :: common."DocumentReferenceType",
+								"_DocumentContacts" => NULL :: tds."DownloadedEInvoiceDocumentContactType",
+								"_DocumentSignedDetails" => NULL :: tds."DownloadedEInvoiceDocumentSignedDetailsType",
+								"_OverwritePrRecord" => NULL :: BOOL,
+								"_SourceType" => NULL :: SMALLINT,
+								"_SourceTypeEInvoice" => NULL :: SMALLINT,
+								"_SourceTypeTaxpayer" => NULL :: SMALLINT,
+								"_EInvoicePushStatusGenerated" => NULL :: SMALLINT,
+								"_EInvoicePushStatusCancelled" => NULL :: SMALLINT,
+								"_DocumentStatusActive" => NULL :: SMALLINT,
+								"_DocumentStatusCancelled" => NULL :: SMALLINT,
+								"_PushToGstStatusCancelled" => NULL :: SMALLINT,
+								"_ContactTypeBillFrom" => NULL :: SMALLINT,
+								"_DocumentTypeCRN" => NULL :: SMALLINT,
+								"_DocumentTypeDBN" => NULL :: SMALLINT,
+								"_SupplyTypeP" => NULL :: SMALLINT);
+*/--------------------------------------------------------------------------------------------------------------------------------------
+DECLARE 
+	"_CurrentDate" TIMESTAMP WITHOUT TIME ZONE := NOW();
+	"_Min" INT := 1; 
+	"_Max" INT; 
+	"_Batchsize" INT; 
+	"_Records" INT;
+BEGIN
+	/* Create table for Id and Mode */
+	DROP TABLE IF EXISTS "TempDocumentIds";
+	CREATE TEMP TABLE "TempDocumentIds"
+	(
+		"AutoId" BIGSERIAL,
+		"Id" BIGINT,
+		"GroupId" INT,
+		"BillingDate" TIMESTAMP WITHOUT TIME ZONE,
+		"Mode" CHARACTER VARYING(2)
+	);
+	
+	/* create table for delete data ids while autosync = false */
+	DROP TABLE IF EXISTS "TempDeletedIds";
+	CREATE TEMP TABLE "TempDeletedIds"
+	(
+		"AutoId" BIGSERIAL,
+		"Id" BIGINT
+	);
+	
+	/* Add  document in temp */
+	DROP TABLE IF EXISTS "TempDocuments";
+	CREATE TEMP TABLE "TempDocuments" AS
+	SELECT 
+		*
+	FROM 
+		UNNEST("_Documents");
+
+	/* Add  document contact in temp */
+	DROP TABLE IF EXISTS "TempDocumentContacts";
+	CREATE TEMP TABLE "TempDocumentContacts" AS
+	SELECT
+		*
+	FROM 
+		UNNEST("_DocumentContacts");
+		
+	/* Add  document signed detail in temp */
+	DROP TABLE IF EXISTS "TempDocumentSignedDetail";
+	CREATE TEMP TABLE "TempDocumentSignedDetail" AS
+	SELECT
+		*
+	FROM 
+		UNNEST("_DocumentSignedDetails");
+	
+	/* Add  document items in temp */
+	DROP TABLE IF EXISTS "TempDocumentItems";
+	CREATE TEMP TABLE "TempDocumentItems" AS
+	SELECT
+		*
+	FROM 
+		UNNEST("_DocumentItems");
+
+	/* Add  document References in temp */
+	DROP TABLE IF EXISTS "TempDocumentReferences";
+	CREATE TEMP TABLE "TempDocumentReferences" AS
+	SELECT 
+		*
+	FROM 
+		UNNEST("_DocumentReferences");
+
+	/* Get Update Mode Data */
+	INSERT INTO "TempDocumentIds"
+	(
+		"Id",
+		"BillingDate",
+		"GroupId",
+		"Mode"
+	)
+	SELECT
+		dw."Id",
+		ps."BillingDate", --ISNULL(ps.BillingDate,_CurrentDate),
+		tpd."GroupId",
+		CASE 
+			WHEN "_SourceType" = "_SourceTypeEInvoice" AND tpd."EInvoicePushStatus" = "_EInvoicePushStatusCancelled" THEN 'C'
+			WHEN "_SourceType" = "_SourceTypeTaxpayer" AND "_OverwritePrRecord" = true THEN 'U'
+			ELSE 'S'
+		END AS "Mode"
+	FROM
+		"TempDocuments" tpd
+		INNER JOIN tds."Documents" AS dw ON 
+		(
+			dw."SubscriberId" = "_SubscriberId"
+			AND dw."ParentEntityId" = "_EntityId"
+			AND dw."DocumentNumber" = tpd."DocumentNumber" 
+			AND dw."DocumentFinancialYear" = tpd."DocumentFinancialYear"
+			AND dw."SourceType" = "_SourceType"
+			AND COALESCE(dw."BillFromGstin", '') = COALESCE(tpd."BillFromGstin", '')
+			AND dw."DocumentType" = tpd."DocumentType"
+			AND dw."IsAmendment" = false
+		)
+		INNER JOIN tds."DocumentStatus" ps ON ps."DocumentId" = dw."Id";
+
+	/* INSERT Documents*/
+	WITH "inserted" AS(
+	INSERT INTO tds."Documents"
+	(
+		"SubscriberId",
+		"ParentEntityId",
+		"EntityId",
+		"UserId",
+		"Irn",
+		"IrnGenerationDate",
+		"DocumentType",
+		"CombineDocumentType",
+		"TransactionType",
+		"TaxpayerType",
+		"DocumentNumber",
+		"DocumentDate",
+		"Pos",
+		"DocumentValue",	
+		"SectionType",
+		"TotalTaxableValue",
+		"TotalTaxAmount",
+		"ReturnPeriod",
+		"DocumentFinancialYear",
+		"FinancialYear",
+		"IsAmendment",	
+		"SourceType",
+		"RefPrecedingDocumentDetails",
+	    "BillFromGstin",
+	    "BillFromPan",
+	    "BillFromTradeName",
+	    "BillToGstin",
+	    "BillToStateCode",
+		"RefundEligibility",
+		"GroupId"
+	)
+	SELECT
+		"_SubscriberId",
+		"_EntityId",
+		"_EntityId",
+		"_UserId",
+		tpd."Irn",
+		tpd."IrnGenerationDate",
+		tpd."DocumentType",
+		CASE WHEN tpd."DocumentType" = "_DocumentTypeDBN" THEN "_DocumentTypeCRN" ELSE tpd."DocumentType" END AS "CombineDocumentType",
+		tpd."TransactionType",
+		tpd."TaxpayerType",
+		tpd."DocumentNumber",
+		tpd."DocumentDate",
+		tpd."Pos",
+		tpd."DocumentValue",
+		tpd."SectionType",
+		tpd."TotalTaxableValue",
+		tpd."TotalTaxAmount",
+		tpd."ReturnPeriod",
+		tpd."DocumentFinancialYear",
+		tpd."FinancialYear",
+		false,			
+		"_SourceType",
+		tpd."RefPrecedingDocumentDetails",
+	    tpd."BillFromGstin",
+	    tpd."BillFromPan",
+	    tpd."BillFromTradeName",
+	    tpd."BillToGstin",
+	    tpd."BillToStateCode",
+		false,
+		tpd."GroupId"	
+	FROM
+		"TempDocuments" tpd
+	WHERE 
+		tpd."GroupId" NOT IN (SELECT tdi."GroupId" FROM "TempDocumentIds" tdi)
+	RETURNING tds."Documents"."Id", tds."Documents"."GroupId")
+
+	INSERT INTO "TempDocumentIds"("Id", "GroupId", "BillingDate", "Mode")
+	SELECT 
+		i."Id",
+		i."GroupId",
+		"_CurrentDate",
+		'I'
+	FROM
+		"inserted" i;
+	
+	/* Insert tds.DocumentStatus for matched records  */
+	INSERT INTO tds."DocumentStatus"
+	(
+		"DocumentId",
+		"Status",
+		"PushStatus",
+		"IsPushed",
+		"AutoDraftSource",
+		"LastSyncDate",
+		"BillingDate"
+	)
+	SELECT  
+		tpdi."Id",
+		CASE WHEN tpd."EInvoicePushStatus" = "_EInvoicePushStatusCancelled" THEN "_DocumentStatusCancelled" ELSE "_DocumentStatusActive" END,
+		CASE WHEN tpd."EInvoicePushStatus" = "_EInvoicePushStatusCancelled" THEN "_PushToGstStatusCancelled" ELSE tpd."GstPushStatus" END,
+		false,
+		tpd."EInvoiceSource",
+		"_CurrentDate",
+		NULL --_CurrentDate
+	FROM
+		"TempDocumentIds" AS tpdi 
+		INNER JOIN "TempDocuments" tpd on tpdi."GroupId" = tpd."GroupId"
+	WHERE 
+		tpdi."Mode" = 'I';
+
+	/* Update Documents AND DocumentStatus with Flag = 'U'*/
+	IF EXISTS (SELECT 1 FROM "TempDocumentIds" WHERE "Mode" = 'U')
+	THEN
+		UPDATE 
+			tds."Documents" AS pd
+		SET
+			"ParentEntityId" = "_EntityId",
+			"EntityId" = "_EntityId",
+			"UserId" = "_UserId",
+			"Irn" = tpd."Irn",
+			"IrnGenerationDate" = tpd."IrnGenerationDate",
+			"DocumentType" = tpd."DocumentType",
+			"TransactionType" = tpd."TransactionType",
+			"TaxpayerType" = tpd."TaxpayerType",
+			"DocumentNumber" = tpd."DocumentNumber",
+			"DocumentDate" = tpd."DocumentDate",
+			"Pos" = tpd."Pos",
+			"DocumentValue" = tpd."DocumentValue",		
+			"SectionType" = tpd."SectionType",
+			"TotalTaxableValue" = tpd."TotalTaxableValue",
+			"TotalTaxAmount" = tpd."TotalTaxAmount",
+			"ReturnPeriod" = tpd."ReturnPeriod",
+			"DocumentFinancialYear" = tpd."DocumentFinancialYear",
+			"FinancialYear" = tpd."FinancialYear",
+			"RefPrecedingDocumentDetails" = tpd."RefPrecedingDocumentDetails",
+			"IsAmendment" = false,			
+			"GroupId" = tpd."GroupId",
+			"ModifiedStamp" = "_CurrentDate"
+		FROM
+			"TempDocumentIds" tpdi
+			INNER JOIN "TempDocuments" AS tpd ON tpd."GroupId" = tpdi."GroupId"
+		WHERE 
+			tpdi."Id" = pd."Id"
+			AND tpdi."Mode" = 'U';
+		
+		UPDATE
+			tds."DocumentStatus" AS ps
+		SET 
+			"Status" = "_DocumentStatusActive",
+			"AutoDraftSource" = tpd."EInvoiceSource",
+			"LastSyncDate" = "_CurrentDate",
+ 			"ModifiedStamp" = "_CurrentDate"
+		FROM
+			"TempDocumentIds" AS tpdi
+			INNER JOIN "TempDocuments" tpd on tpdi."GroupId" = tpd."GroupId"
+		WHERE 
+			tpdi."Mode" = 'U'
+			AND ps."DocumentId" = tpdi."Id";
+	END IF;
+	
+	/* Update Documents AND DocumentStatus with Flag = 'C'*/
+	IF EXISTS (SELECT 1 FROM "TempDocumentIds" WHERE "Mode" = 'C')
+	THEN
+		UPDATE
+			tds."DocumentStatus" 
+		SET 
+			"Status" = "_DocumentStatusCancelled",
+			"PushStatus" = "_PushToGstStatusCancelled",
+			"AutoDraftSource" = tpd."EInvoiceSource",
+			"LastSyncDate" = "_CurrentDate",
+ 			"ModifiedStamp" = "_CurrentDate"
+		FROM
+			"TempDocumentIds" AS tpdi 
+			INNER JOIN "TempDocuments" tpd on tpdi."GroupId" = tpd."GroupId"
+		WHERE 
+			tpdi."Mode" = 'C'
+			AND ps."DocumentId" = tpdi."Id";
+	END IF;
+	
+	/* Delete DocumentItems and DocumentPayments for both Insert and Update Case  */	
+	IF EXISTS (SELECT "AutoId" FROM "TempDocumentIds")
+	THEN
+		SELECT 
+			COUNT("AutoId")
+		INTO
+			"_Max"
+		FROM 
+			"TempDocumentIds";
+
+		"_Batchsize" := CASE 
+							WHEN COALESCE("_Max",0) > 100000 THEN (("_Max"*10)/100)
+							ELSE "_Max"
+						END;
+		WHILE("_Min" <= "_Max")
+		LOOP 
+			"_Records" := "_Min" + "_Batchsize";
+			
+			/* delete signed detail */
+			DELETE 
+			FROM 
+				tds."DocumentSignedDetails" AS pdc
+				USING "TempDocumentIds" AS tpdi 
+			WHERE 
+				pdc."DocumentId" = tpdi."Id"
+				AND tpdi."Mode" = 'U'
+				AND tpdi."AutoId" BETWEEN "_Min" AND "_Records";
+			
+			/* delete items detail */
+			DELETE 
+			FROM 
+				tds."DocumentItems" AS pdi
+				USING "TempDocumentIds" AS tpdi 
+			WHERE 
+				pdi."DocumentId" = tpdi."Id"
+				AND tpdi."Mode" = 'U'
+				AND tpdi."AutoId" BETWEEN "_Min" AND "_Records";
+			
+			"_Min" := "_Records";
+		END LOOP;
+	END IF;
+
+	INSERT INTO tds."DocumentItems"
+	(
+		"DocumentId",
+		"Hsn",
+		"Description",
+		"Rate",
+		"TaxableValue",
+		"IgstAmount",
+		"CgstAmount",
+		"SgstAmount",
+		"IsService"
+	)
+	SELECT
+		tpdi."Id",
+		tid."Hsn",
+		tid."Description",
+		tid."Rate",
+		tid."TaxableValue",
+		tid."IgstAmount",
+		tid."CgstAmount",
+		tid."SgstAmount",
+		tid."IsService"
+	FROM
+		"TempDocumentItems" AS tid
+		INNER JOIN "TempDocumentIds" AS "tpdi" ON tid."GroupId" = tpdi."GroupId"
+	WHERE 
+		tpdi."Mode" IN ('I', 'U');
+
+	INSERT INTO tds."DocumentSignedDetails"
+	(
+		"DocumentId",
+		"AckNumber",
+		"SignedInvoice",
+		"SignedQrCode",
+		"IsCompress",
+		"EwayBillNumber",
+		"EwayBillDate",
+		"EwayBillValidTill",
+		"Remarks",
+		"CancellationDate",
+		"CancellationReason",
+		"CancellationRemark",
+		"Provider",
+		"Stamp"
+	)
+	SELECT
+		tpdi."Id",
+		tpdsd."AcknowledgementNumber",
+		tpdsd."SignedInvoice",
+		tpdsd."SignedQrCode",
+		tpdsd."IsCompress",
+		tpdsd."EwayBillNumber",
+		tpdsd."EwayBillDate",
+		tpdsd."EwayBillValidTill",
+		tpdsd."Remarks",
+		tpdsd."CancellationDate",
+		tpdsd."CancellationReason",
+		tpdsd."CancellationRemark",
+		tpdsd."ProviderType",
+		NOW()
+	FROM
+		"TempDocumentSignedDetail" AS tpdsd
+		INNER JOIN "TempDocumentIds" AS tpdi ON tpdsd."GroupId" = tpdi."GroupId"
+	WHERE 
+		tpdi."Mode" IN ('I','U');
+
+	INSERT INTO tds."DocumentReferences"
+	(
+		"DocumentId",
+		"DocumentNumber",
+		"DocumentDate"
+	)
+	SELECT
+		tpdi."Id",
+		tpdr."DocumentNumber",
+		tpdr."DocumentDate"
+	FROM
+		"TempDocumentReferences" AS tpdr
+		INNER JOIN "TempDocumentIds" AS tpdi ON tpdr."GroupId" = tpdi."GroupId"
+	WHERE 
+		tpdi."Mode" IN ('I');
+
+	DROP TABLE IF EXISTS "TempUpsertDocumentIds";
+	CREATE TEMP TABLE "TempUpsertDocumentIds" AS
+	SELECT 
+		tdi."Id" 
+	FROM 
+		"TempDocumentIds" tdi;
+
+	RETURN QUERY
+	SELECT
+		tsd."Id",
+		CASE WHEN tsd."BillingDate" = "_CurrentDate" THEN true ELSE false END AS "PlanLimitApplicable",
+		tsd."GroupId"
+	FROM
+		"TempDocumentIds" As tsd;
+		
+END;
+$function$
+
