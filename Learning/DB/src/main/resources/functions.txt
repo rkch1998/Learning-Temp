@@ -1,4 +1,2 @@
-notice."FilterNotices"
-notice."GetNoticesByIds"
-notice."GetRecentNotice"
-notice."GetSummaryForNotices"
+app.GetBackgroundStatusById
+app.GetPendingBackgroundStatusByTypes

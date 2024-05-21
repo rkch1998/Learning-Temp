@@ -39,6 +39,7 @@ public class FunctionProcessor {
                     System.out.println("Invalid function name format: " + line);
                 }
             }
+            results
             functionWriter.writeToFile(String.join("\n", results), outputFilePath);
         } catch (IOException e) {
             System.out.println("Error reading input file: " + e.getMessage());

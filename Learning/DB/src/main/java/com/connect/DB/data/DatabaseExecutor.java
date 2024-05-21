@@ -29,7 +29,7 @@ public class DatabaseExecutor implements DatabaseOperations{
         try (PreparedStatement statement = connection.prepareStatement(query);
              ResultSet resultSet = statement.executeQuery()) {
             if (resultSet.next()) {
-                return resultSet.getString(1);
+                return resultSet.getString(1)+";";
             }
         } catch (SQLException e) {
             System.out.println("Error executing query: " + e.getMessage());

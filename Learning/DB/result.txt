@@ -1,265 +1,443 @@
-DROP FUNCTION IF EXISTS notice."FilterNotices";
+DROP FUNCTION IF EXISTS app."GetBackgroundStatusById";
 
-CREATE OR REPLACE FUNCTION notice."FilterNotices"("_Start" integer, "_Size" integer, "_SortExpression" character varying, "_SubscriberId" integer, "_Ids" bigint[], "_FinancialYear" integer, "_EntityIds" integer[], "_NoticeIds" character varying, "_FromNoticeDate" timestamp without time zone, "_ToNoticeDate" timestamp without time zone, "_FromNoticeDueDate" timestamp without time zone, "_ToNoticeDueDate" timestamp without time zone, "_CategoryTypes" character varying, "_ActionStatuses" character varying)
- RETURNS TABLE("Id" bigint, "TotalRecord" integer)
+CREATE OR REPLACE FUNCTION app."GetBackgroundStatusById"("_Id" bigint, "_Stamp" timestamp without time zone, "_SkipBackgroundTaskId" bigint, "_BackgroundTaskStatusYetNotStarted" smallint, "_BackgroundTaskStatusAttempted" smallint, "_BackgroundTaskStatusCompleted" smallint, "_BackgroundTaskStatusManual" smallint, "_BackgroundTaskStatusDequeued" smallint)
+ RETURNS TABLE("Id" bigint, "UserId" integer, "ActualStatus" smallint, "Status" smallint, "CallbackType" smallint, "RequestUrl" character varying, "Result" character varying, "ResultStamp" timestamp without time zone, "Stamp" timestamp without time zone, "Exception" character varying, "RequestId" uuid)
  LANGUAGE plpgsql
 AS $function$
-DECLARE 	"_SQL" TEXT = '';
-			"_FromSQL" TEXT = '' ;
-			"_TotalRecord" INTEGER DEFAULT 0;
+/*--------------------------------------------------------------------------------------------------------------------------------------
+* 	Procedure Name		: app."GetBackgroundStatusById" 	 	 
+* 	Comments			: 2022-10-07 | Shambhu Das | This procedure is used to get details of Backgound Status.
+						: 06-04-2023 | Prakash Parmar | Added SkipBackgroundTaskId
+						: 28-04-2023 | Shambhu Das | Added partition key in cte
+						: 07-06-2023 | Shambhu Das | Optimised partition related query optimization.
+						: 12-06-2023 | Dhruv Amin	| Optimised partition related query optimization.
+						: 15-02-2024 | Prakash Parmar | Return YetNotStarted in case of manual 
+						: 09-05-2024 | Prakash Parmar | Handled Deferred background type
+----------------------------------------------------------------------------------------------------------------------------------------
+*   Test Execution		: 	SELECT * FROM app."GetBackgroundStatusById"
+							(
+								"_Id" := 25272 ::bigint,
+								"_SkipBackgroundTaskId" := NULL::SMALLINT,
+								"_Stamp" := '2023-04-10 17:15:04.03004'::timestamp without time zone,
+								"_BackgroundTaskStatusYetNotStarted" := 1 ::smallint,
+								"_BackgroundTaskStatusAttempted" := 2 ::smallint,
+								"_BackgroundTaskStatusCompleted" := 3 ::smallint,
+								"_BackgroundTaskStatusManual" := 7 ::smallint,
+								"_BackgroundTaskStatusDequeued" := 9 :: smallint
+							);
+*/--------------------------------------------------------------------------------------------------------------------------------------*/ 	
+
+DECLARE 
+	"_Count" INT;
+	"_BackgroundTaskStatus" SMALLINT;
+	"_True" BOOLEAN := true;
+	"_FromStamp" TIMESTAMP WITHOUT TIME ZONE;
+	"_ToStamp" TIMESTAMP WITHOUT TIME ZONE;
+	"_TodayFromStamp" TIMESTAMP WITHOUT TIME ZONE = CONCAT(NOW()::DATE, ' 00:00:00')::TIMESTAMP WITHOUT TIME ZONE;
+	"_TodayToStamp" TIMESTAMP WITHOUT TIME ZONE = CONCAT(NOW()::DATE, ' 23:59:59')::TIMESTAMP WITHOUT TIME ZONE;
+	"_3DayFromTodayStamp" TIMESTAMP WITHOUT TIME ZONE = (NOW()::DATE + INTERVAL '-2 Day')::TIMESTAMP WITHOUT TIME ZONE;	
+	"_PostCallbackResponseTypeId" INT;
 BEGIN
-	DROP TABLE IF EXISTS "TempEntities","TempIds";
-	
-	CREATE TEMP TABLE IF NOT EXISTS "TempEntities" AS
-	SELECT  * FROM UNNEST("_EntityIds") AS "EntityId" ; 
-	
-	CREATE TEMP TABLE IF NOT EXISTS "TempIds" AS
-	SELECT  * FROM UNNEST("_Ids") AS "Id"; 
 
-	CREATE  INDEX "IDX_TempEntities_Item" ON "TempEntities"("EntityId");
-	CREATE  INDEX "IDX_TempIds_Item" ON "TempIds"("Id");
+	DROP TABLE IF EXISTS "TempDeferredTypes";
+	CREATE TEMP TABLE "TempDeferredTypes" AS 
+	SELECT 
+		bt."Id"			
+	FROM 
+		app."BackgroundTypes" bt
+	WHERE 
+		bt."Deferred" = "_True";
 	
-		"_FromSQL" :=CONCAT(N' FROM 
-							notice."Notices" n
-							INNER JOIN "TempEntities" te ON n."EntityId" = te."EntityId"
-						WHERE
-							n."SubscriberId" =' || "_SubscriberId"||
-							' AND n."FinancialYear" =' || "_FinancialYear" ,
-							
-						CASE
-							WHEN EXISTS (SELECT 1 FROM "TempIds" )
-							THEN ' AND n."Id" IN (SELECT "Id" FROM "TempIds")'
-							ELSE ''
-						END,
-						CASE 
-							WHEN "_NoticeIds" IS NULL 
-							THEN ''
-							ELSE' AND n."NoticeId" IN ('|| "_NoticeIds" ||')'  
-						END,
-						CASE 
-							WHEN "_FromNoticeDate" IS NULL AND "_ToNoticeDate" IS NULL
-							THEN ''
-							ELSE ' AND n."NoticeDate" BETWEEN ''' ||"_FromNoticeDate"||'''AND''' ||"_ToNoticeDate"||''''
-						END,
-						CASE 
-							WHEN "_FromNoticeDueDate" IS NULL AND "_ToNoticeDueDate" IS NULL
-							THEN ''
-							ELSE ' AND n."NoticeDueDate" BETWEEN ''' || "_FromNoticeDueDate" || '''AND''' ||"_ToNoticeDueDate"||'''' 
-						END,
-						CASE 
-							WHEN "_CategoryTypes" IS NULL 
-							THEN ''
-							ELSE' AND n."CategoryType" IN (' ||"_CategoryTypes"|| ')'  
-						END,
-						CASE 
-							WHEN "_ActionStatuses" IS NULL 
-							THEN ''
-							ELSE' AND n."ActionStatus" IN (' ||"_ActionStatuses"|| ')'  
-						END
-						);
+	SELECT 
+		bt."Id" 
+	INTO
+		"_PostCallbackResponseTypeId" 
+	FROM 
+		app."BackgroundTypes" bt
+	WHERE 
+		bt."Type" = 'CI.Domain.Request.App.PostCallbackResponse';
 
-		IF "_Start" = 0
+	IF ("_Stamp" IS NULL)
 	THEN
-		EXECUTE 'SELECT COUNT(n."Id")' || "_FromSQL" INTO "_TotalRecord";
- 	END IF;
+		/*Trying to get row in the same day*/
+		SELECT 
+			bid."Stamp",
+			CAST(bid."Stamp" AS DATE) + INTERVAL '3 Day'
+		INTO 
+			"_FromStamp",
+			"_ToStamp"
+		FROM 
+			app."BackgroundTasks" AS bid
+		WHERE 
+			bid."Stamp" BETWEEN "_TodayFromStamp" AND "_TodayToStamp"
+			AND bid."Id" = "_Id";
+
+		/*Trying to get row in the last 3 day*/
+		IF ("_FromStamp" IS NULL AND "_ToStamp" IS NULL)
+		THEN
+			SELECT 
+				bid."Stamp",
+				CAST(bid."Stamp" AS DATE) + INTERVAL '3 Day'
+			INTO 
+				"_FromStamp",
+				"_ToStamp"
+			FROM 
+				app."BackgroundTasks" AS bid
+			WHERE 
+				bid."Stamp" BETWEEN "_3DayFromTodayStamp" AND "_TodayToStamp"
+				AND bid."Id" = "_Id";
+		END IF;
+
+		/*Trying to get row in overall table*/
+		IF ("_FromStamp" IS NULL AND "_ToStamp" IS NULL)
+		THEN
+			SELECT 
+				bid."Stamp",
+				CAST(bid."Stamp" AS DATE) + INTERVAL '3 Day'
+			INTO 
+				"_FromStamp",
+				"_ToStamp"
+			FROM 
+				app."BackgroundTasks" AS bid
+			WHERE 
+				bid."Id" = "_Id";
+		END IF;
+	ELSE
+		SELECT 
+			bid."Stamp",
+			CAST(bid."Stamp" AS DATE) + INTERVAL '3 Day'
+		INTO 
+			"_FromStamp",
+			"_ToStamp"
+		FROM 
+			app."BackgroundTasks" AS bid
+		WHERE 
+			bid."Stamp" = "_Stamp"
+			AND bid."Id" = "_Id";
+	END IF;
 	
-	IF ("_SortExpression" IS NULL OR "_SortExpression" = '')
+	IF ("_SkipBackgroundTaskId" IS NULL)
 	THEN
-		"_SortExpression" := 'n."Id" DESC';	
-	Else
-		"_SortExpression" := 'n.'|| common."GetSortExpression"("_SortExpression") || ', n."Id" DESC ';
+		"_SkipBackgroundTaskId" := 0;
+	END IF;	
+
+	IF ("_ToStamp" > "_TodayToStamp")
+	THEN
+		"_ToStamp" := "_TodayToStamp";
+	END IF;	
+	
+	DROP TABLE IF EXISTS "TempBackgroundTasks";
+	CREATE TEMP TABLE "TempBackgroundTasks" AS
+	WITH RECURSIVE "BackgroundTasksCte" AS 
+	(
+		SELECT 
+			bid."Id", bid."TaskId" as "ParentId" , bid."Status", CASE WHEN bid."Status" = "_BackgroundTaskStatusManual" THEN -1 ELSE NULL END AS "ManualBackgroundTypeId"
+		FROM 
+			app."BackgroundTasks" AS bid
+		WHERE
+			bid."Stamp" BETWEEN "_FromStamp" AND "_ToStamp"
+			AND bid."Id" = "_Id"
+		
+		UNION ALL
+			
+		SELECT 
+			btid."Id", btid."TaskId" as "ParentId", btid."Status", NULL AS "ManualBackgroundTypeId"
+		FROM 
+			app."BackgroundTasks" AS btid
+			INNER JOIN "BackgroundTasksCte" btc ON btc."Id" = btid."TaskId"
+		WHERE
+			btid."Stamp" BETWEEN "_FromStamp" AND "_ToStamp"
+			AND btid."TaskId" IS NOT NULL
+			AND btid."Id" <> "_SkipBackgroundTaskId"
+			AND btid."BackgroundTypeId" <> "_PostCallbackResponseTypeId"
+			AND NOT EXISTS(SELECT dt."Id" FROM "TempDeferredTypes" dt WHERE dt."Id" = COALESCE(btc."ManualBackgroundTypeId", btid."BackgroundTypeId"))
+	)
+	SELECT 
+		btc."Status"	
+	FROM 
+		"BackgroundTasksCte" btc
+	WHERE
+		btc."Status" <> "_BackgroundTaskStatusManual"
+	GROUP BY 
+		btc."Status";
+
+	SELECT 
+		 COUNT(1) 
+		 INTO "_Count"
+	FROM 
+		"TempBackgroundTasks";
+
+	IF("_Count" = 1 AND EXISTS(SELECT 1 FROM "TempBackgroundTasks" bt WHERE bt."Status" ="_BackgroundTaskStatusYetNotStarted"))
+	THEN
+		 "_BackgroundTaskStatus" := "_BackgroundTaskStatusYetNotStarted";		 
+	ELSIF (EXISTS(SELECT 1 FROM "TempBackgroundTasks" bt WHERE bt."Status" IN ("_BackgroundTaskStatusYetNotStarted","_BackgroundTaskStatusAttempted", "_BackgroundTaskStatusDequeued")))	
+	THEN
+	 	 "_BackgroundTaskStatus" := "_BackgroundTaskStatusAttempted";	
+	ELSIF ("_Count" = 0)
+	THEN
+		"_BackgroundTaskStatus" := "_BackgroundTaskStatusYetNotStarted";
+	ELSE	
+		 "_BackgroundTaskStatus" := "_BackgroundTaskStatusCompleted";
 	END IF;
 
-	"_FromSQL" := "_FromSQL" || ' ORDER BY ' || "_SortExpression";
-	
-	IF "_Size" IS NOT NULL
-	THEN		
-		"_FromSQL" := "_FromSQL" || ' LIMIT ' || "_Size" || ' OFFSET ' || "_Start";
- 	END IF;
-	
-	"_SQL" := 'SELECT n."Id", ' || "_TotalRecord" ||' AS "TotalRecord" ' || "_FromSQL";
-	
-	RETURN QUERY EXECUTE 
-		'SELECT n."Id", ' || "_TotalRecord" ||'  AS "TotalRecord" ' || "_FromSQL";
-	
-	
-	
-END;
-$function$
-
-DROP FUNCTION IF EXISTS notice."GetNoticesByIds";
-
-CREATE OR REPLACE FUNCTION notice."GetNoticesByIds"("_SubscriberId" integer, "_Ids" bigint[])
- RETURNS TABLE("Id" bigint, "EntityId" integer, "NoticeId" character varying, "Description" character varying, "NoticeDate" timestamp without time zone, "NoticeDueDate" timestamp without time zone, "NoticeStatus" character varying, "ActionStatus" smallint, "CategoryType" smallint, "Details" character varying, "Stamp" timestamp without time zone)
- LANGUAGE plpgsql
-AS $function$
-/*------------------------------------------------------------------------------------------------------------------------------------------------------------
-Procedure Name	:	notice."GetNoticesByIds"
-* 	Comment			:	18/10/2022 | Chetan Saini | This procedure is used to get Notices.
---------------------------------------------------------------------------------------------------------------------------------------------------------------
-*   Test Execution	    : SELECT * FROM notice."GetNoticesByIds"(
-							"_SubscriberId" :=227::int,
-							"_Ids":=array[1]::bigint[]
-							)
-*/-----------------------------------------------------------------------------------------------------------
-
-BEGIN
-		DROP  TABLE IF EXISTS "TempNoticeIds";
-		CREATE TEMP TABLE "TempNoticeIds"
-	(
-		"AutoId" SERIAL,
-		"Id" BIGINT
-	);
-
-	INSERT INTO "TempNoticeIds"("Id")
-	SELECT 
-		*
-	FROM 
-		unnest("_Ids");
 	RETURN QUERY
 	SELECT 
-		n."Id",
-		n."EntityId",
-		n."NoticeId",
-		n."Description",
-		n."NoticeDate",
-		n."NoticeDueDate",
-		n."NoticeStatus",
-		n."ActionStatus",
-		n."CategoryType",
-		n."Details",
-	    n."Stamp"
+		bt."Id",
+		bt."UserId",
+		bt."Status" as "ActualStatus",
+		"_BackgroundTaskStatus" AS "Status",
+		bt."CallbackType",
+		ru."Url" AS "RequestUrl",
+		bt."Result",
+		bt."ResultStamp",
+		bt."Stamp",
+		bt."Exception",
+		bt."RequestId"
 	FROM 
-		notice."Notices" n
-		INNER JOIN "TempNoticeIds" tni ON n."Id" = tni."Id"	
+		app."BackgroundTasks" AS bt 
+		LEFT JOIN app."RequestUrls" ru ON bt."RequestUrlId" = ru."Id"
 	WHERE 
-		n."SubscriberId" = "_SubscriberId"
-	ORDER BY
-		tni."AutoId";
-
-	
+		bt."Stamp" BETWEEN "_FromStamp" AND "_ToStamp"
+		AND bt."Id" = "_Id";
 END;
 $function$
 
-DROP FUNCTION IF EXISTS notice."GetRecentNotice";
+DROP FUNCTION IF EXISTS app."GetPendingBackgroundStatusByTypes";
 
-CREATE OR REPLACE FUNCTION notice."GetRecentNotice"("_SubscriberId" integer, "_EntityIds" integer[])
- RETURNS TABLE("EntityId" integer, "Description" character varying, "NoticeDate" timestamp without time zone)
+CREATE OR REPLACE FUNCTION app."GetPendingBackgroundStatusByTypes"("_SubscriberId" integer, "_UserId" integer, "_RequestUrls" character varying[], "_Gateway" smallint, "_BackgroundTaskStatusYetNotStarted" smallint, "_BackgroundTaskStatusAttempted" smallint, "_BackgroundTaskStatusCompleted" smallint, "_BackgroundTaskStatusManual" smallint, "_BackgroundTaskStatusDequeued" smallint, "_GatewayAdmin" smallint)
+ RETURNS TABLE("Id" bigint, "RequestUrl" character varying, "Status" smallint, "Result" character varying, "ResultStamp" timestamp without time zone, "Stamp" timestamp without time zone, "Exception" character varying, "RequestId" uuid)
  LANGUAGE plpgsql
 AS $function$
-/*-------------------------------------------------------------------------------------------------------------------------------
-* 	Procedure Name	: notice."GetRecentNotice"	 	 
-*	Comments		: 24-04-2024 | Sumant Kumar |  This procedure is used to Get Recent Notices.
-*   Sample Execution :  SELECT * FROM notice."GetRecentNotice"  (
-										 "_SubscriberId":= 476 :: INT,
-										 "_EntityIds" := ARRAY[21631] :: integer[])
--------------------------------------------------------------------------------------------------------------------------------*/
-BEGIN
+/*--------------------------------------------------------------------------------------------------------------------------------------
+* 	Procedure Name		: app."GetPendingBackgroundStatusByTypes" 
+* 	Comments			: 07-10-2022| Chetan Saini | This procedure is used to get Get Pending Background Status By Types.
+						: 12-06-2023 | Dhruv Amin	| Optimised partition related query optimization.
+						: 09-05-2024 | Prakash Parmar | Handled Deferred background type
+----------------------------------------------------------------------------------------------------------------------------------------
+*   Test Execution	    : 	
+SELECT * FROM  app."GetPendingBackgroundStatusByTypes"
+(
+	"_SubscriberId":=968::integer,
+	"_UserId":=11429::integer,
+	"_RequestUrls":=array['"/v0.1/ewaybill/email","/v0.1/ewaybill/emailDocuments","/v0.1/ewaybill/sms","/v0.1/ewaybill/export","/v0.1/ewaybill/responses","/v0.1/ewaybill/exportXelerate","/v0.1/ewaybill/exportBulkPdf","/v0.1/ewaybill/exportBulkDetailPdf","/v0.1/ewaybill/moveAutoDraft","/v0.1/ewaybill/exportBulkInvoicePdf","/v0.1/ewaybill/generate","/v0.1/ewaybill/generateByIrn","/v0.1/ewaybill/updateTransporter","/v0.1/ewaybill/updateVehilceDetail","/v0.1/ewaybill/extendValidity","/v0.1/ewaybill/download","/v0.1/ewaybill/cancel","/v0.1/ewaybill/reject","/v0.1/gst/taxpayer/refresh","/v0.1/import/document","/v0.1/import/document/ewaybillCompliant","/v0.1/import/document/ewaybillbyIrnCompliant"']::character varying[],
+	"_Gateway"=>2::smallint,
+	"_BackgroundTaskStatusYetNotStarted":=1::smallint,
+	"_BackgroundTaskStatusAttempted":=2::smallint,
+	"_BackgroundTaskStatusCompleted":=3::smallint,
+	"_BackgroundTaskStatusManual":=7::smallint,
+	"_BackgroundTaskStatusDequeued"=>9::smallint,
+	"_GatewayAdmin"=>1::smallint
+)
+*/--------------------------------------------------------------------------------------------------------------------------------------
+DECLARE 
+	"_Count" INT;
+	"_BackgroundTaskStatus" SMALLINT;
+	"_PostCallbackResponse" INT;
+	"_MainId" BIGINT;
+	"_TodayToStamp" TIMESTAMP WITHOUT TIME ZONE = CONCAT(NOW()::DATE, ' 23:59:59')::TIMESTAMP WITHOUT TIME ZONE;
+	"_3DayFromTodayStamp" TIMESTAMP WITHOUT TIME ZONE = (NOW()::DATE + INTERVAL '-2 Day')::TIMESTAMP WITHOUT TIME ZONE;	
+	"_FromStamp" TIMESTAMP WITHOUT TIME ZONE;
+	"_PostCallbackResponseTypeId" INT;
 
-	DROP TABLE IF EXISTS "TempEntityIds";	
-	CREATE TEMP TABLE "TempEntityIds"
-	(
-		"Item" INTEGER NOT NULL
-	);
+BEGIN	
+	DROP TABLE IF EXISTS
+		"TempUnnestRequestUrls",
+		"TempRequestUrls", 
+		"TempBackgroundTasks",
+		"TempStatus",
+		"TaskCountId";
+
+	CREATE TEMP TABLE "TempUnnestRequestUrls" AS
+	SELECT * FROM UNNEST("_RequestUrls") AS "Item";		
 	
-	INSERT INTO "TempEntityIds"("Item") 
+	CREATE TEMP TABLE "TempRequestUrls" AS	
 	SELECT
-		*
+		ru."Id",
+		ru."Url"	
 	FROM
-		UNNEST("_EntityIds") AS "Item";
-		
-  RETURN QUERY
-  SELECT 
-		n."EntityId",
-		n."Description",
-		n."NoticeDate"
-	FROM 
-		notice."Notices" n
-	WHERE 
-	    n."SubscriberId" = "_SubscriberId"
-		AND n."EntityId" IN (SELECT "Item" FROM "TempEntityIds")
-	ORDER BY
-	    n."Stamp" DESC
-	LIMIT 5;
-END;
-$function$
-
-DROP FUNCTION IF EXISTS notice."GetSummaryForNotices";
-
-CREATE OR REPLACE FUNCTION notice."GetSummaryForNotices"("_SubscriberId" integer, "_FinancialYear" integer, "_EntityIds" integer[], "_ActionStatuses" smallint[])
- RETURNS TABLE("Status" smallint, "Count" integer)
- LANGUAGE plpgsql
-AS $function$
-
-BEGIN
-	DROP TABLE IF EXISTS  "TempEntityIds", "TempActionStatuses", "TempSummaryResult","TempResult";
+		"TempUnnestRequestUrls" tru	
+		INNER JOIN app."RequestUrls" AS ru ON LOWER(tru."Item") = LOWER(ru."Url");
 	
-	CREATE TEMP TABLE IF NOT EXISTS "TempEntityIds" AS
+	DROP TABLE IF EXISTS "TempDeferredTypes";
+	CREATE TEMP TABLE "TempDeferredTypes" AS 
 	SELECT 
-		* FROM UNNEST("_EntityIds") AS "EntityId";
+		bt."Id"			
+	FROM 
+		app."BackgroundTypes" bt
+	WHERE 
+		bt."Deferred" = true;
 
-	CREATE TEMP TABLE IF NOT EXISTS "TempActionStatuses" AS
 	SELECT 
-		* FROM UNNEST("_ActionStatuses") AS "ActionStatus";
+		bt."Id" 
+	INTO
+		"_PostCallbackResponseTypeId" 
+	FROM 
+		app."BackgroundTypes" bt
+	WHERE 
+		bt."Type" = 'CI.Domain.Request.App.PostCallbackResponse';
 
-	CREATE Temp TABLE "TempSummaryResult"
+	CREATE TEMP TABLE  "TempStatus"
 	(
-		"ActionStatus" SMALLINT,
-		"Count" INT
-	);
-
-	CREATE TEMP TABLE "TempResult"
-	(
+		"MainId" BIGINT,
+		"RequestUrl" CHARACTER VARYING,
 		"Status" SMALLINT,
-		"Count" INT
+		"Stamp" TIMESTAMP WITHOUT TIME ZONE
 	);
 
-	INSERT INTO "TempSummaryResult"
+	IF ("_Gateway" = "_GatewayAdmin")
+	THEN
+		INSERT INTO "TempStatus"(
+			"MainId",
+			"RequestUrl",
+			"Status",
+			"Stamp"
+		)
+		SELECT
+			MAX(bt."Id"),
+			tru."Url",
+			NULL,
+			MAX(bt."Stamp")
+		FROM 
+			app."BackgroundTasks" AS bt 
+			INNER JOIN "TempRequestUrls" AS tru ON tru."Id" = bt."RequestUrlId"
+		WHERE 
+			bt."Stamp" BETWEEN "_3DayFromTodayStamp" AND "_TodayToStamp"
+			AND bt."TaskId" IS NULL
+			AND bt."Gateway" = "_GatewayAdmin"
+		GROUP BY
+			tru."Url";
+	ELSE
+		INSERT INTO "TempStatus"(
+			"MainId",
+			"RequestUrl",
+			"Status",
+			"Stamp"
+		)
+		SELECT
+			MAX(bt."Id"),
+			tru."Url",
+			NULL ,
+			MAX(bt."Stamp")
+		FROM 
+			app."BackgroundTasks" AS bt 
+			INNER JOIN "TempRequestUrls" AS tru ON tru."Id" = bt."RequestUrlId"
+		WHERE 
+			bt."Stamp" BETWEEN "_3DayFromTodayStamp" AND "_TodayToStamp"
+			AND bt."TaskId" IS NULL
+			AND bt."Gateway" <> "_GatewayAdmin"
+			AND bt."UserId" = "_UserId"
+			AND bt."SubscriberId" = "_SubscriberId"			
+		GROUP BY
+			tru."Url";
+	END IF;
+	
+	SELECT 
+		MIN(ts."Stamp")
+	INTO 
+		"_FromStamp"
+	FROM 
+		"TempStatus" AS ts;
+
+	CREATE TEMP TABLE "TempBackgroundTasks"
 	(
-		"ActionStatus",
-		"Count"
+		"MainId" BIGINT,
+		"Status" SMALLINT,
+		"CountId" INT
+	);	
+
+	WITH RECURSIVE "BackgroundTasksCte" AS 
+	(
+		SELECT 
+			ts."MainId",
+			bid."Id",
+			bid."TaskId" AS ParentId, 
+			bid."Status",
+			CASE WHEN bid."Status" = "_BackgroundTaskStatusManual" THEN -1 ELSE NULL END AS "ManualBackgroundTypeId"
+		FROM 
+			app."BackgroundTasks" AS bid
+			INNER JOIN "TempStatus" AS ts ON ts."MainId" = bid."Id"
+		WHERE
+			bid."Stamp" BETWEEN "_FromStamp" AND "_TodayToStamp"
+		
+		UNION ALL
+			
+		SELECT 
+			btc."MainId",
+			btid."Id",
+			btid."TaskId" as "ParentId",
+			btid."Status",
+			NULL AS "ManualBackgroundTypeId"
+		FROM 
+			app."BackgroundTasks" AS btid
+			INNER JOIN "BackgroundTasksCte" btc ON btc."Id" = btid."TaskId"
+		WHERE
+			btid."Stamp" BETWEEN "_FromStamp" AND "_TodayToStamp"
+			AND btid."TaskId" IS NOT NULL
+			AND btid."BackgroundTypeId" <> "_PostCallbackResponseTypeId"
+			AND NOT EXISTS(SELECT dt."Id" FROM "TempDeferredTypes" dt WHERE dt."Id" = COALESCE(btc."ManualBackgroundTypeId", btid."BackgroundTypeId"))
+	)
+	INSERT INTO "TempBackgroundTasks"
+	(
+		"MainId",
+		"Status"
 	)
 	SELECT 
-		n."ActionStatus",
-		COUNT(1)
+		btc."MainId",
+		btc."Status"
 	FROM 
-		"TempEntityIds"  AS tei 
-		INNER JOIN notice."Notices" AS n ON tei."EntityId" = n."EntityId"
+		"BackgroundTasksCte" btc
 	WHERE
-		n."FinancialYear" = "_FinancialYear" 
-		AND n."SubscriberId" = "_SubscriberId"
-	GROUP BY
-		n."ActionStatus";
+		btc."Status" <> "_BackgroundTaskStatusManual"
+	GROUP BY 
+		btc."MainId",
+		btc."Status";
 
-	INSERT INTO "TempResult"
-	(
-		"Status",
-		"Count"
-	)
+	CREATE TEMP TABLE "TaskCountId" AS	
 	SELECT 
-		null,
-		SUM(tsr."Count")
-	FROM
-		"TempSummaryResult" tsr;
-
-	INSERT INTO "TempResult"
-	(
-		"Status",
-		"Count"
-	)
-	SELECT 
-		tas."ActionStatus" AS "Status",
-		COALESCE(tsr."Count", 0) AS "Count"
+		"MainId",
+		COUNT(1) "CountId"	
 	FROM 
-		"TempActionStatuses" AS tas
-		LEFT JOIN "TempSummaryResult" tsr ON tsr."ActionStatus" = tas."ActionStatus";
+		"TempBackgroundTasks"
+	GROUP BY 
+		"MainId";
+
+	UPDATE 
+		"TempBackgroundTasks" bt
+	SET 
+		"CountId" = id."CountId"
+	FROM 		
+		 "TaskCountId" id
+	WHERE bt."MainId" = id."MainId";
+
+	UPDATE 
+		"TempStatus" ts 
+	SET 
+		"Status"  = CASE 
+						WHEN "CountId" = 1 AND bt."Status" = "_BackgroundTaskStatusYetNotStarted" THEN "_BackgroundTaskStatusYetNotStarted"
+						WHEN bt."Status" IN ("_BackgroundTaskStatusYetNotStarted", "_BackgroundTaskStatusAttempted", "_BackgroundTaskStatusDequeued") THEN "_BackgroundTaskStatusAttempted"
+						WHEN "CountId" = 0 THEN  "_BackgroundTaskStatusYetNotStarted"
+						ELSE "_BackgroundTaskStatusCompleted"
+					END
+	FROM		
+		"TempBackgroundTasks" bt 
+	WHERE ts."MainId" = bt."MainId";
+
 	RETURN QUERY
 	SELECT 
-		tr."Status",
-		tr."Count"
-	FROM "TempResult" tr;
+		ts."MainId" AS "Id",
+		ts."RequestUrl",
+		CASE WHEN ts."Status" IS NULL THEN "_BackgroundTaskStatusCompleted" ELSE ts."Status" END AS "Status", 
+		bt."Result",
+		bt."ResultStamp",
+		bt."Stamp",
+		bt."Exception",
+		bt."RequestId"
+	FROM 
+		"TempStatus" AS ts
+		INNER JOIN app."BackgroundTasks" bt ON bt."Id" = ts."MainId"
+	WHERE
+		bt."Stamp" BETWEEN "_FromStamp" AND "_TodayToStamp";
 
-	
 END;
 $function$
 
