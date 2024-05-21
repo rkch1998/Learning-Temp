@@ -1,6 +1,7 @@
 package com.connect.DB;
 
 import com.connect.DB.service.FunctionProcessor;
+import com.connect.DB.util.ConfigLoader;
 import com.connect.DB.util.FunctionWriter;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 
@@ -12,15 +13,24 @@ public class DbApplication {
 
 	public static void main(String[] args) {
 		try {
+			// Load database
+
+			ConfigLoader configLoader = new ConfigLoader("dbconfig.properties");
+			String url = configLoader.getProperty("db.url");
+			String username = configLoader.getProperty("db.username");
+			String password = configLoader.getProperty("db.password");
+
 			// Initialize dependencies
-//			DatabaseExecutor databaseExecutor = new DatabaseExecutor("jdbc:postgresql://localhost:5432/db_name", "username", "password");
-			DatabaseExecutor databaseExecutor = new DatabaseExecutor();
+			DatabaseExecutor databaseExecutor = new DatabaseExecutor(url, username, password);
+//			DatabaseExecutor databaseExecutor = new DatabaseExecutor();
 			FunctionWriter fileWriter = new FunctionWriter();
 			FunctionProcessor functionProcessor = new FunctionProcessor(databaseExecutor, fileWriter);
 
 			// Example function to process
-			String function = "tds.\"InsertDownloads\"";
-			functionProcessor.processFunction(function);
+			String inputFilePath = "D:\\Learn\\GitHub\\Ravi\\Learning\\Learning\\DB\\src\\main\\resources\\functions.txt";
+			String outputFilePath = "result.txt";
+//			String function = "notice.\"UpdateActionStatus\"";
+			functionProcessor.processFunctionsFromFile(inputFilePath, outputFilePath);
 		} catch (SQLException e) {
 			System.out.println("Error connecting to database: " + e.getMessage());
 		}
