@@ -1,115 +1,164 @@
 package com.connect.DB;
 
-import com.connect.DB.service.FunctionProcessor;
-import com.connect.DB.util.ConfigLoader;
-import com.connect.DB.util.FunctionWriter;
-import org.springframework.boot.autoconfigure.SpringBootApplication;
+import java.io.*;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.sql.*;
+import java.util.*;
 
-
-import java.sql.SQLException;
-import com.connect.DB.data.DatabaseExecutor;
-@SpringBootApplication
 public class DbApplication {
 
 	public static void main(String[] args) {
-		try {
-			// Load database
 
+		if (args.length != 3) {
+			System.out.println("Usage: java DbApplication <inputFilePath> <outputFilePath> <dbName>");
+			return;
+		}
+
+		String inputFilePath = args[0];
+		String outputFilePath = args[1];
+		String dbName = args[2];
+
+		try {
+			// Load database configurations
 			ConfigLoader configLoader = new ConfigLoader("dbconfig.properties");
-			String url = configLoader.getProperty("db.url");
-			String username = configLoader.getProperty("db.username");
-			String password = configLoader.getProperty("db.password");
+			Map<String, String[]> dbConfigs = new HashMap<>();
+			dbConfigs.put("master", new String[]{
+					configLoader.getProperty("db.master.url"),
+					configLoader.getProperty("db.master.username"),
+					configLoader.getProperty("db.master.password")
+			});
+			dbConfigs.put("appdata", new String[]{
+					configLoader.getProperty("db.appdata.url"),
+					configLoader.getProperty("db.appdata.username"),
+					configLoader.getProperty("db.appdata.password")
+			});
+			dbConfigs.put("tenant", new String[]{
+					configLoader.getProperty("db.tenant.url"),
+					configLoader.getProperty("db.tenant.username"),
+					configLoader.getProperty("db.tenant.password")
+			});
 
 			// Initialize dependencies
-			DatabaseExecutor databaseExecutor = new DatabaseExecutor(url, username, password);
-//			DatabaseExecutor databaseExecutor = new DatabaseExecutor();
+			DatabaseExecutor databaseExecutor = new DatabaseExecutor(dbConfigs);
 			FunctionWriter fileWriter = new FunctionWriter();
 			FunctionProcessor functionProcessor = new FunctionProcessor(databaseExecutor, fileWriter);
 
-			// Example function to process
-			String inputFilePath = "D:\\Learn\\GitHub\\Ravi\\Learning\\Learning\\DB\\src\\main\\resources\\functions.txt";
-			String outputFilePath = "result.txt";
-//			String function = "notice.\"UpdateActionStatus\"";
-			functionProcessor.processFunctionsFromFile(inputFilePath, outputFilePath);
+			// Process functions from file
+			functionProcessor.processFunctionsFromFile(inputFilePath, outputFilePath, dbName);
 		} catch (SQLException e) {
 			System.out.println("Error connecting to database: " + e.getMessage());
 		}
 	}
 
-/*
+	static class FunctionProcessor {
+		private final DatabaseExecutor databaseOperations;
+		private final FunctionWriter functionWriter;
 
-	public static String query(String schemaName, String functionName){
-		String finalQuery =  String.format("""
-				SELECT F.full_text :: varchar
-				FROM
-				(
-				SELECT oid, proname
-				FROM pg_proc
-				WHERE proname like '%s'
-					AND pronamespace IN (SELECT oid FROM pg_namespace WHERE nspname = '%s')
-				) AS P
-				JOIN LATERAL
-				(SELECT pg_get_functiondef(P.oid) AS full_text) AS F ON TRUE;""", functionName ,schemaName);
-		System.out.println(finalQuery);
-		return finalQuery;
-	}
+		public FunctionProcessor(DatabaseExecutor databaseOperations, FunctionWriter functionWriter) {
+			this.databaseOperations = databaseOperations;
+			this.functionWriter = functionWriter;
+		}
 
-	public static String[] splitFunction(String function){
-		return function.split("\\.");
-	}
-
-    public static void main(String[] args) {
-
-		String filePath = "D:\\Learn\\GitHub\\result.txt";
-
-		try {
-
-			Connection connection = DataBaseConnect.getConnection();
-
-			String function = "tds.InsertDownloads";
-
-			String[] result = splitFunction(function);
-			String schema;
-			String functionName;
-
-			if(result != null && result.length == 2) {
-				schema = result[0];
-				functionName = result[1];
-
-				PreparedStatement statement = connection.prepareStatement(query(schema, functionName));
-
-				ResultSet resultSet = statement.executeQuery();
-//				System.out.println(resultSet.next());
-				while (resultSet.next()) {
-					System.out.println("Written Successfully");
-					writeIntoFile(resultSet, filePath, schema, functionName);
-
+		public void processFunctionsFromFile(String inputFilePath, String outputFilePath, String dbName) {
+			List<String> results = new ArrayList<>();
+			try (BufferedReader reader = Files.newBufferedReader(Path.of(inputFilePath))) {
+				String line;
+				while ((line = reader.readLine()) != null) {
+					String[] result = parseFunction(line);
+					if (result.length == 2) {
+						String schema = result[0];
+						String functionName = result[1].replaceAll("\"", "");
+						String queryResult = databaseOperations.executeQuery(dbName, schema, functionName);
+						if (queryResult != null) {
+							results.add(String.format("DROP FUNCTION IF EXISTS %s.\"%s\";\n", schema, functionName));
+							results.add(queryResult);
+						} else {
+							System.out.println("Error executing query for function: " + line + " - " + dbName);
+						}
+					} else {
+						System.out.println("Invalid function name format: " + line + dbName);
+					}
 				}
 
-			}else{
-				System.out.println("Invalid function name format");
+				functionWriter.writeToFile(String.join("\n", results), outputFilePath);
+			} catch (IOException e) {
+				System.out.println("Error reading input file: " + e.getMessage());
 			}
-		} catch (SQLException e) {
-			e.printStackTrace();
+		}
+
+		private String[] parseFunction(String function) {
+			function = function.replace("\"", "");
+			return function.split("\\.");
 		}
 	}
 
-	public static void writeIntoFile(ResultSet resultSet, String filePath, String schema, String functionName){
-		try(BufferedWriter writer = new BufferedWriter((new FileWriter(filePath, false)))){
-			//int id = resultSet.getInt("StudentId");
-			String name = resultSet.getString("full_text");
-			String dropFunction = String.format("DROP FUNCTION IF EXISTS %s.\"%s\";", schema, functionName);
-			writer.write(dropFunction);
-			writer.newLine();
-			writer.write(name);
-			writer.newLine();
-			System.out.println(name);
-			System.out.println(dropFunction);
-		}catch(IOException e) {
-			System.out.println("Error occurred while writing the file");
-		}catch (SQLException e) {
-			System.out.println("Error occurred while from getting the string");
+	static class DatabaseExecutor {
+		private final Map<String, Connection> connections = new HashMap<>();
+
+		public DatabaseExecutor(Map<String, String[]> dbConfigs) throws SQLException {
+			for (Map.Entry<String, String[]> entry : dbConfigs.entrySet()) {
+				String dbName = entry.getKey();
+				String[] config = entry.getValue();
+				String url = config[0];
+				String username = config[1];
+				String password = config[2];
+				connections.put(dbName, DriverManager.getConnection(url, username, password));
+			}
+		}
+
+		public Connection getConnection(String dbName) {
+			return connections.get(dbName);
+		}
+
+		public String executeQuery(String dbName, String schemaName, String functionName) {
+			String query = String.format("""
+                    SELECT pg_get_functiondef(oid)
+                    FROM pg_proc
+                    WHERE proname = '%s'
+                    AND pronamespace = (SELECT oid FROM pg_namespace WHERE nspname = '%s')
+                    """, functionName, schemaName);
+
+			try (PreparedStatement statement = getConnection(dbName).prepareStatement(query);
+				 ResultSet resultSet = statement.executeQuery()) {
+				if (resultSet.next()) {
+					return resultSet.getString(1) + ";";
+				}
+			} catch (SQLException e) {
+				System.out.println("Error executing query: " + e.getMessage());
+			}
+			return null;
 		}
 	}
-*/
+
+	static class FunctionWriter {
+		public void writeToFile(String content, String filePath) {
+			try (BufferedWriter writer = Files.newBufferedWriter(Path.of(filePath))) {
+				writer.write(content);
+				writer.newLine();
+				System.out.println("Data written to file successfully!");
+			} catch (IOException e) {
+				System.out.println("Error writing to file: " + e.getMessage());
+			}
+		}
+	}
+
+	static class ConfigLoader {
+		private final Properties properties = new Properties();
+
+		public ConfigLoader(String configFilePath) {
+			try (InputStream input = getClass().getClassLoader().getResourceAsStream(configFilePath)) {
+				if (input == null) {
+					throw new IOException("Unable to find " + configFilePath);
+				}
+				properties.load(input);
+			} catch (IOException e) {
+				throw new RuntimeException("Failed to load properties file: " + e.getMessage(), e);
+			}
+		}
+
+		public String getProperty(String key) {
+			return properties.getProperty(key);
+		}
+	}
 }

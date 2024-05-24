@@ -10,12 +10,11 @@ public class ConfigLoader {
     public ConfigLoader(String configFilePath){
         try(InputStream input = getClass().getClassLoader().getResourceAsStream(configFilePath)){
             if(input == null){
-                System.out.println("Unable to find " + configFilePath);
-                return;
+                throw new IOException("Unable to find " + configFilePath);
             }
             properties.load(input);
         }catch (IOException e){
-            e.printStackTrace();
+            throw new RuntimeException("Failed to load properties file: " + e.getMessage(), e);
         }
     }
 
