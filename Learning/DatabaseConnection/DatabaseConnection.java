@@ -12,10 +12,10 @@ public class DatabaseConnection{
         try{
             Class.forName("org.postgresql.Driver");
 
-            String url = "jdbc:postgresql://103.158.108.17:5432/1_CygnetGSPTenant_1";
+            String url = "jdbc:postgresql://10.10.10.01:5432/1_Tenant_1";
 
-            String userName = "CygGSPDBA";
-            String password = "Admin#321";
+            String userName = "#####";
+            String password = "#####";
 
             connection = DriverManager.getConnection(url,userName,password);
 
@@ -48,9 +48,9 @@ public class DatabaseConnection{
 
     private static void initializeDataSoucrce(){
         HikariConfig config = new HikariConfig();
-        config.setJdbcUrl("jdbc:postgresql://103.158.108.17:5432/1_CygnetGSPTenant_1");
-        config.setUsername("CygGSPDBA");
-        config.setPassword("Admin#321");
+        config.setJdbcUrl("jdbc:postgresql://10.10.10.01:5432/1_Tenant_1");
+        config.setUsername("#####");
+        config.setPassword("#####");
 
         config.setMaximumPoolSize(10);
 
